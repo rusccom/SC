@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex,nofollow">
+  <title>Metrics Console</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body class="page-dashboard">
+  <aside class="sidebar">
+    <div class="me">
+      <div class="me-label">your id</div>
+      <div class="me-handle" id="meHandle" title="click to copy"></div>
+      <div class="me-status" id="meStatus">offline</div>
+    </div>
+    <div class="add-friend">
+      <input id="friendHandle" placeholder="friend id..." autocomplete="off" spellcheck="false">
+      <button id="addFriendBtn" title="add friend">+</button>
+    </div>
+    <div class="friends-list" id="friendsList"></div>
+    <button class="logout" id="logoutBtn">выход</button>
+  </aside>
+  <main class="chat-pane">
+    <div class="chat-header">
+      <div class="chat-title" id="chatTitle">—</div>
+      <div class="chat-actions">
+        <button id="callBtn" title="call" disabled>📞</button>
+      </div>
+    </div>
+    <div class="chat-body" id="chatBody"></div>
+    <form class="chat-input" id="chatForm" autocomplete="off">
+      <input id="chatInput" placeholder="message..." autocomplete="off" spellcheck="false" disabled>
+      <button type="submit" id="chatSend" disabled>→</button>
+    </form>
+  </main>
+  <div class="call-overlay hidden" id="callOverlay">
+    <div class="call-card">
+      <div class="call-peer" id="callPeer"></div>
+      <div class="call-status" id="callStatus">calling…</div>
+      <div class="call-timer" id="callTimer"></div>
+      <div class="call-actions">
+        <button id="callAccept" class="accept hidden">accept</button>
+        <button id="callReject" class="reject hidden">reject</button>
+        <button id="callHangup" class="hangup">end</button>
+      </div>
+    </div>
+  </div>
+  <audio id="remoteAudio" autoplay></audio>
+  <script type="module" src="/js/dashboard.js"></script>
+</body>
+</html>
