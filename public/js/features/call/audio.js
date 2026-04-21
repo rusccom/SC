@@ -1,122 +1,141 @@
-const MIME_TYPES = [
-  'audio/webm;codecs=opus',
-  'audio/webm',
-];
+const SAMPLE_RATE = 16000;
+const WORKLET_URL = '/js/features/call/pcm-capture-worklet.js';
 
-export function pickMime() {
-  if (typeof MediaRecorder === 'undefined') return null;
-  for (const m of MIME_TYPES) {
-    if (MediaRecorder.isTypeSupported(m)) return m;
-  }
-  return null;
+export function canUseAudio() {
+  return typeof AudioContext !== 'undefined' ||
+    typeof webkitAudioContext !== 'undefined';
+}
+
+function createCtx() {
+  const Ctor = window.AudioContext || window.webkitAudioContext;
+  return new Ctor();
 }
 
 export class AudioTx {
   constructor(onChunk) {
     this.onChunk = onChunk;
     this.stream = null;
-    this.recorder = null;
+    this.ctx = null;
+    this.source = null;
+    this.node = null;
+    this.silentGain = null;
     this.seq = 0;
   }
 
   async start() {
-    const mime = pickMime();
-    if (!mime) throw new Error('MediaRecorder/opus не поддерживается');
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
         noiseSuppression: true,
         autoGainControl: true,
+        channelCount: 1,
       },
       video: false,
     });
-    this.recorder = new MediaRecorder(this.stream, {
-      mimeType: mime,
-      audioBitsPerSecond: 24000,
-    });
-    this.recorder.addEventListener('dataavailable', (e) => this._onData(e));
-    this.recorder.start(250);
+    this.ctx = createCtx();
+    if (this.ctx.state === 'suspended') await this.ctx.resume();
+    await this.ctx.audioWorklet.addModule(WORKLET_URL);
+    this.source = this.ctx.createMediaStreamSource(this.stream);
+    this.node = new AudioWorkletNode(this.ctx, 'pcm-capture');
+    this.node.port.onmessage = (e) => this._onChunk(e.data);
+    this.silentGain = this.ctx.createGain();
+    this.silentGain.gain.value = 0;
+    this.source.connect(this.node);
+    this.node.connect(this.silentGain);
+    this.silentGain.connect(this.ctx.destination);
   }
 
-  async _onData(ev) {
-    if (!ev.data || ev.data.size === 0) return;
-    const buf = new Uint8Array(await ev.data.arrayBuffer());
-    this.onChunk(this.seq++, buf);
+  _onChunk(buffer) {
+    if (!buffer) return;
+    this.onChunk(this.seq++, new Uint8Array(buffer));
   }
 
   stop() {
-    try { if (this.recorder && this.recorder.state !== 'inactive') this.recorder.stop(); } catch {}
+    try { if (this.node) this.node.port.onmessage = null; } catch {}
+    try { if (this.node) this.node.disconnect(); } catch {}
+    try { if (this.source) this.source.disconnect(); } catch {}
+    try { if (this.silentGain) this.silentGain.disconnect(); } catch {}
     try { if (this.stream) this.stream.getTracks().forEach((t) => t.stop()); } catch {}
-    this.recorder = null;
+    try { if (this.ctx) this.ctx.close(); } catch {}
+    this.node = null;
+    this.source = null;
+    this.silentGain = null;
     this.stream = null;
+    this.ctx = null;
   }
 }
 
 export class AudioRx {
-  constructor(audioEl) {
-    this.audioEl = audioEl;
-    this.mediaSource = null;
-    this.sourceBuffer = null;
-    this.queue = [];
+  constructor() {
+    this.ctx = null;
+    this.nextPlayTime = 0;
     this.pendingBySeq = new Map();
     this.nextSeq = 0;
-    this.ready = false;
     this.closed = false;
   }
 
-  start(mime) {
-    this.mediaSource = new MediaSource();
-    this.audioEl.src = URL.createObjectURL(this.mediaSource);
-    this.mediaSource.addEventListener('sourceopen', () => this._onOpen(mime));
+  async start() {
+    if (this.ctx) return;
+    this.ctx = createCtx();
+    if (this.ctx.state === 'suspended') await this.ctx.resume();
+    this.nextPlayTime = this.ctx.currentTime + 0.08;
   }
 
-  _onOpen(mime) {
-    try {
-      this.sourceBuffer = this.mediaSource.addSourceBuffer(mime);
-      this.sourceBuffer.mode = 'sequence';
-      this.sourceBuffer.addEventListener('updateend', () => this._pump());
-      this.ready = true;
-      this._pump();
-    } catch (e) {
-      console.warn('sourceBuffer error', e);
-    }
-  }
-
-  push(seq, chunk) {
-    if (this.closed) return;
+  push(seq, bytes) {
+    if (this.closed || !this.ctx) return;
+    if (seq < this.nextSeq) return;
     if (seq === this.nextSeq) {
-      this.queue.push(chunk);
+      this._play(bytes);
       this.nextSeq++;
       this._drainPending();
-    } else if (seq > this.nextSeq) {
-      this.pendingBySeq.set(seq, chunk);
+    } else {
+      if (this.pendingBySeq.size > 40) this._flushPending();
+      this.pendingBySeq.set(seq, bytes);
     }
-    this._pump();
   }
 
   _drainPending() {
     while (this.pendingBySeq.has(this.nextSeq)) {
-      const c = this.pendingBySeq.get(this.nextSeq);
+      const b = this.pendingBySeq.get(this.nextSeq);
       this.pendingBySeq.delete(this.nextSeq);
-      this.queue.push(c);
+      this._play(b);
       this.nextSeq++;
     }
   }
 
-  _pump() {
-    if (!this.ready || !this.sourceBuffer || this.sourceBuffer.updating) return;
-    if (this.queue.length === 0) return;
-    const chunk = this.queue.shift();
-    try { this.sourceBuffer.appendBuffer(chunk); } catch {}
+  _flushPending() {
+    const sorted = [...this.pendingBySeq.entries()].sort((a, b) => a[0] - b[0]);
+    for (const [seq, b] of sorted) {
+      this._play(b);
+      this.nextSeq = seq + 1;
+    }
+    this.pendingBySeq.clear();
+  }
+
+  _play(bytes) {
+    const int16 = new Int16Array(
+      bytes.buffer, bytes.byteOffset, bytes.byteLength >> 1
+    );
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32767;
+    const buf = this.ctx.createBuffer(1, float32.length, SAMPLE_RATE);
+    buf.copyToChannel(float32, 0);
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(this.ctx.destination);
+    const now = this.ctx.currentTime;
+    const when = Math.max(this.nextPlayTime, now + 0.005);
+    src.start(when);
+    this.nextPlayTime = when + buf.duration;
+    if (this.nextPlayTime - now > 0.8) {
+      this.nextPlayTime = now + 0.08;
+    }
   }
 
   stop() {
     this.closed = true;
-    this.queue = [];
     this.pendingBySeq.clear();
-    try { if (this.mediaSource && this.mediaSource.readyState === 'open') this.mediaSource.endOfStream(); } catch {}
-    try { this.audioEl.pause(); this.audioEl.src = ''; } catch {}
-    this.mediaSource = null;
-    this.sourceBuffer = null;
+    try { if (this.ctx) this.ctx.close(); } catch {}
+    this.ctx = null;
   }
 }

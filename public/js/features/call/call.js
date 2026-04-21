@@ -1,6 +1,6 @@
-import { aesEncrypt, aesDecryptText, aesDecryptBytes, randomId, b64e, b64d } from '../crypto/crypto.js';
+import { aesEncrypt, aesDecryptText, aesDecryptBytes, randomId } from '../crypto/crypto.js';
 import { sharedKeyWith } from '../friends/friends.js';
-import { AudioTx, AudioRx, pickMime } from './audio.js';
+import { AudioTx, AudioRx, canUseAudio } from './audio.js';
 
 const STATE = {
   IDLE: 'idle',
@@ -10,14 +10,12 @@ const STATE = {
 };
 
 export class CallManager extends EventTarget {
-  constructor(ctx, audioEl) {
+  constructor(ctx) {
     super();
     this.ctx = ctx;
-    this.audioEl = audioEl;
     this.state = STATE.IDLE;
     this.peer = null;
     this.callId = null;
-    this.mime = null;
     this.tx = null;
     this.rx = null;
   }
@@ -26,32 +24,34 @@ export class CallManager extends EventTarget {
 
   async invite(friend) {
     if (this.inCall) throw new Error('уже в звонке');
-    if (!pickMime()) throw new Error('звонки недоступны в этом браузере');
+    if (!canUseAudio()) throw new Error('аудио недоступно');
     this.peer = friend;
     this.callId = randomId();
     this.state = STATE.OUTGOING;
     const key = await sharedKeyWith(this.ctx, friend);
-    await this._sendSignal(key, {
-      action: 'invite', callId: this.callId, mime: pickMime(),
+    await this._sendSignalTo(friend, key, {
+      action: 'invite', callId: this.callId,
     });
-    this._emit('state');
+    this._emit();
   }
 
   async accept() {
     if (this.state !== STATE.INCOMING) return;
     const key = await sharedKeyWith(this.ctx, this.peer);
-    await this._sendSignal(key, {
-      action: 'accept', callId: this.callId, mime: pickMime(),
+    await this._sendSignalTo(this.peer, key, {
+      action: 'accept', callId: this.callId,
     });
     await this._startMedia();
     this.state = STATE.ACTIVE;
-    this._emit('state');
+    this._emit();
   }
 
   async reject() {
     if (this.state !== STATE.INCOMING) return;
     const key = await sharedKeyWith(this.ctx, this.peer);
-    await this._sendSignal(key, { action: 'reject', callId: this.callId });
+    await this._sendSignalTo(this.peer, key, {
+      action: 'reject', callId: this.callId,
+    });
     this._teardown();
   }
 
@@ -59,14 +59,16 @@ export class CallManager extends EventTarget {
     if (!this.inCall) return;
     if (this.peer) {
       const key = await sharedKeyWith(this.ctx, this.peer);
-      await this._sendSignal(key, { action: 'end', callId: this.callId });
+      await this._sendSignalTo(this.peer, key, {
+        action: 'end', callId: this.callId,
+      });
     }
     this._teardown();
   }
 
   async onIncomingPayload(friend, payload) {
-    if (payload.kind === 'call') return await this._onSignal(friend, payload);
-    if (payload.kind === 'audio') return await this._onAudio(friend, payload);
+    if (payload.kind === 'call') return this._onSignal(friend, payload);
+    if (payload.kind === 'audio') return this._onAudio(friend, payload);
   }
 
   async _onSignal(friend, payload) {
@@ -76,8 +78,8 @@ export class CallManager extends EventTarget {
     catch { return; }
     if (sig.action === 'invite') return this._handleInvite(friend, sig);
     if (sig.action === 'accept') return this._handleAccept(sig);
-    if (sig.action === 'reject') return this._handleReject();
-    if (sig.action === 'end') return this._handleEnd();
+    if (sig.action === 'reject') return this._teardown();
+    if (sig.action === 'end') return this._teardown();
   }
 
   async _handleInvite(friend, sig) {
@@ -90,22 +92,17 @@ export class CallManager extends EventTarget {
     }
     this.peer = friend;
     this.callId = sig.callId;
-    this.mime = sig.mime;
     this.state = STATE.INCOMING;
-    this._emit('state');
+    this._emit();
   }
 
   async _handleAccept(sig) {
     if (this.state !== STATE.OUTGOING) return;
     if (sig.callId !== this.callId) return;
-    this.mime = sig.mime;
     await this._startMedia();
     this.state = STATE.ACTIVE;
-    this._emit('state');
+    this._emit();
   }
-
-  _handleReject() { this._teardown(); }
-  _handleEnd() { this._teardown(); }
 
   async _onAudio(friend, payload) {
     if (this.state !== STATE.ACTIVE) return;
@@ -119,9 +116,8 @@ export class CallManager extends EventTarget {
   }
 
   async _startMedia() {
-    const mime = this.mime || pickMime();
-    this.rx = new AudioRx(this.audioEl);
-    this.rx.start(mime);
+    this.rx = new AudioRx();
+    await this.rx.start();
     this.tx = new AudioTx((seq, bytes) => this._sendAudio(seq, bytes));
     await this.tx.start();
   }
@@ -133,10 +129,6 @@ export class CallManager extends EventTarget {
     this.ctx.transport.relay(this.peer.handle, {
       kind: 'audio', callId: this.callId, seq, env,
     });
-  }
-
-  async _sendSignal(key, sig) {
-    await this._sendSignalTo(this.peer, key, sig);
   }
 
   async _sendSignalTo(friend, key, sig) {
@@ -153,13 +145,14 @@ export class CallManager extends EventTarget {
     this.rx = null;
     this.peer = null;
     this.callId = null;
-    this.mime = null;
     this.state = STATE.IDLE;
-    this._emit('state');
+    this._emit();
   }
 
-  _emit(name) {
-    this.dispatchEvent(new CustomEvent(name, { detail: { state: this.state, peer: this.peer } }));
+  _emit() {
+    this.dispatchEvent(new CustomEvent('state', {
+      detail: { state: this.state, peer: this.peer },
+    }));
   }
 }
 

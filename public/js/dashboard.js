@@ -51,7 +51,7 @@ function setupUi(ctx) {
     (handle) => openChat(ctx, handle),
     (handle) => { if (ctx.activePeer && ctx.activePeer.handle === handle) chatUi.clear(); }
   );
-  const callMgr = new CallManager(ctx, $('remoteAudio'));
+  const callMgr = new CallManager(ctx);
   const callUi = new CallUI(callMgr, {
     overlay: $('callOverlay'),
     peer: $('callPeer'),
