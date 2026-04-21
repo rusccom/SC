@@ -19,6 +19,7 @@ app.use(express.static(PUBLIC_DIR, { extensions: ['html'] }));
 registerRoutes(app);
 
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
+app.get('/favicon.ico', (_req, res) => res.status(204).end());
 app.get('/', (_req, res) => res.sendFile(join(PUBLIC_DIR, 'index.html')));
 app.use((_req, res) => res.status(404).json({ error: 'not_found' }));
 

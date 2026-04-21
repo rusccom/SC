@@ -4,6 +4,8 @@ import {
   listFriends, getFriend, saveFriend, deleteFriend,
 } from '../storage/friends-store.js';
 
+export { getFriend };
+
 const sharedKeyCache = new Map();
 
 export async function addFriend(ctx, targetHandle) {
